@@ -730,6 +730,14 @@ _not_ be sent. To resend all messages, use the `restart` option.
 
 </details>
 
+<details><summary>I override or combine segment(s)?</summary>
+
+When you [add a `segment` to a step](#customizing-who-gets-what) in a campaign that
+also has one or more [campaign segments](#segmenting-specific-campaigns), the message
+will be sent only when _all_ segments match (return `true`).
+
+</details>
+
 **Less frequently asked questions:**
 
 <details><summary>Can the same message be delivered twice?</summary>
