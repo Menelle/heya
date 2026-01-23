@@ -185,6 +185,9 @@ Heya.configure do |config|
   # The name of the model you want to use with Heya.
   config.user_type = "User"
 
+  # The default time zone for send_at scheduling (defaults to "UTC").
+  config.default_time_zone = "America/New_York"
+
   # The default options to use when processing campaign steps.
   config.campaigns.default_options = {from: "user@example.com"}
 
@@ -280,6 +283,7 @@ for each step:
 | Option Name | Default                           | Description                                              |
 | :---------- | :-------------------------------- | :------------------------------------------------------- |
 | `wait`      | `2.days`                          | The duration of time to wait before sending each message |
+| `send_at`   | `nil`                             | The time of day to send the message (e.g., `"10:00"`)    |
 | `segment`   | `nil`                             | The segment who should receive the message               |
 | `action`    | `Heya::Campaigns::Actions::Email` | The action to perform (usually sending an email)         |
 | `queue`     | `"heya"`                          | The ActiveJob queue                                      |
@@ -371,6 +375,132 @@ class OnboardingCampaign < ApplicationCampaign
   step :welcome,
     subject: ->(user) { "Heya #{user.first_name}!" }
 end
+```
+
+#### Scheduling at specific times
+
+By default, Heya sends messages as soon as the `wait` period has elapsed. You can
+use the `send_at` option to send messages at a specific time of day instead.
+
+The `send_at` option accepts:
+- An integer for the hour: `send_at: 10` (10:00 AM)
+- A string for the hour: `send_at: "10"` (10:00 AM)
+- A string with hour and minutes: `send_at: "10:30"` (10:30 AM)
+
+```ruby
+class OnboardingCampaign < ApplicationCampaign
+  time_zone "America/New_York"
+
+  step :welcome, wait: 0, send_at: "10:00"
+  step :getting_started, wait: 1.day, send_at: "14:00"
+  step :tips, wait: 2.days, send_at: "10:30"
+end
+```
+
+##### Campaign-level send_at
+
+You can set a default `send_at` for all steps in a campaign using the `send_at`
+method. Steps can override this with their own `send_at` option:
+
+```ruby
+class OnboardingCampaign < ApplicationCampaign
+  time_zone "America/New_York"
+  send_at "10:00"  # Default for all steps
+
+  step :welcome, wait: 0                     # Sends at 10:00
+  step :tips, wait: 1.day                    # Sends at 10:00
+  step :offer, wait: 2.days, send_at: "14:00"  # Overrides to 14:00
+end
+```
+
+##### Multiple steps on the same day
+
+You can send multiple steps on the same day at different times by using `wait: 0`
+with different `send_at` times:
+
+```ruby
+class DailyDigestCampaign < ApplicationCampaign
+  time_zone "America/New_York"
+
+  step :morning_summary, wait: 0, send_at: "8:00"
+  step :afternoon_tips, wait: 0, send_at: "14:00"
+  step :evening_recap, wait: 0, send_at: "18:00"
+end
+```
+
+When a user is added to this campaign at 7:00 AM, they will receive:
+- `morning_summary` at 8:00 AM (same day)
+- `afternoon_tips` at 2:00 PM (same day)
+- `evening_recap` at 6:00 PM (same day)
+
+##### Late enrollment behavior
+
+If a user joins a campaign after the first step's `send_at` time has passed,
+the entire campaign is postponed to the next day to prevent multiple emails from
+being sent in rapid succession:
+
+```ruby
+class OnboardingCampaign < ApplicationCampaign
+  time_zone "America/New_York"
+
+  step :welcome, wait: 0, send_at: "10:00"
+  step :tips, wait: 0, send_at: "14:00"
+  step :offer, wait: 0, send_at: "16:00"
+end
+```
+
+If a user joins at 6:00 PM (after all `send_at` times):
+- `welcome` is scheduled for **next day at 10:00 AM**
+- `tips` will be sent at **next day at 2:00 PM**
+- `offer` will be sent at **next day at 4:00 PM**
+
+##### Skipped steps and timing
+
+When a step is skipped (because the user doesn't match its segment), subsequent
+steps use the last actually sent step's time as their reference. This prevents
+skipped steps from delaying the campaign:
+
+```ruby
+class OnboardingCampaign < ApplicationCampaign
+  time_zone "UTC"
+
+  step :welcome, wait: 0, send_at: "10:00"
+  step :premium_tips, wait: 0, send_at: "14:00", segment: :premium?
+  step :general_tips, wait: 0, send_at: "16:00"
+end
+```
+
+For a non-premium user who joins at 8:00 AM:
+- `welcome` sent at 10:00 AM
+- `premium_tips` skipped at 2:00 PM (user is not premium)
+- `general_tips` sent at 4:00 PM (same day, uses `welcome`'s time as reference)
+
+If the calculated time ends up on a **past date** (not just a past time today),
+Heya automatically rolls forward to the next occurrence of that time.
+
+##### Time zones
+
+You can set the time zone at the campaign level using the `time_zone` method:
+
+```ruby
+class OnboardingCampaign < ApplicationCampaign
+  time_zone "America/New_York"
+
+  step :welcome, wait: 0, send_at: "10:00"  # 10:00 AM Eastern Time
+end
+```
+
+If no time zone is specified, Heya uses the `default_time_zone` from the
+configuration (defaults to `"UTC"`).
+
+##### Running the scheduler with send_at
+
+When using `send_at`, you should run the scheduler frequently (every 5 minutes
+is recommended) to ensure messages are sent at the correct times:
+
+```bash
+# Run every 5 minutes via cron or a scheduled job
+*/5 * * * * cd /path/to/app && bundle exec rails heya:scheduler
 ```
 
 #### Translations for email subjects (I18n)
@@ -696,10 +826,40 @@ receive the new one since it has replaced its position in the campaign.
 
 <details><summary>A user skips a message based on its conditions?</summary>
 
-Heya waits the defined wait time for every message in the campaign. If a user
-doesn't match the conditions, Heya skips it. If the _next_ message's wait time
-is less than or equal to the skipped message's, it sends it immediately. If the
-next wait period is longer, it sends it after the new wait time has elapsed.
+When a step is skipped because the user doesn't match its segment:
+
+**Without `send_at`:** Heya waits the defined wait time for every message. If the
+_next_ message's wait time is less than or equal to the skipped message's, it
+sends it immediately. If the next wait period is longer, it sends it after the
+new wait time has elapsed.
+
+**With `send_at`:** The next step uses the last _actually sent_ step's time as
+its reference (not the skipped step's scheduled time). This ensures skipped steps
+don't delay subsequent messages. If the calculated time is on a past date, Heya
+rolls forward to the next occurrence of that `send_at` time.
+
+</details>
+
+<details><summary>A user joins a campaign after the first step's send_at time?</summary>
+
+If a user joins a campaign after the first step's `send_at` time has passed for
+today, the entire campaign is postponed to the next day. This prevents multiple
+emails from being sent in rapid succession when all steps have `wait: 0` with
+`send_at` times that have already passed.
+
+Example: A campaign has steps at 10:00, 14:00, and 16:00. If a user joins at
+18:00, they will receive the first step at 10:00 the _next day_, followed by
+the remaining steps at their scheduled times.
+
+</details>
+
+<details><summary>I use send_at with different times on the same day?</summary>
+
+You can send multiple steps on the same day by using `wait: 0` with different
+`send_at` times. The steps will be sent in order at their specified times.
+
+If a step's `send_at` time is earlier than the previous step's time (e.g., step 1
+at 14:00, step 2 at 10:00), step 2 will be scheduled for the next day at 10:00.
 
 </details>
 
