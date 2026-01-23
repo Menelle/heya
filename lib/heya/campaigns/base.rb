@@ -43,13 +43,21 @@ module Heya
         last_sent_at = receipts.maximum(:created_at)
         receipt_gids = receipts.map(&:step_gid)
         if (step = steps.find { |s| receipt_gids.exclude?(s.gid) })
+          now = Time.now.utc
+          scheduled_for = ScheduleCalculator.calculate_scheduled_for(
+            step: step,
+            reference_time: last_sent_at || now,
+            time_zone: self.class.time_zone
+          )
+
           membership.create! do |m|
             m.concurrent = concurrent
             m.step_gid = step.gid
             m.last_sent_at = last_sent_at
+            m.scheduled_for = scheduled_for
           end
 
-          if send_now && step.wait == 0
+          if send_now && step.wait == 0 && scheduled_for.nil?
             Scheduler.new.run(user: user)
           end
         end
@@ -79,12 +87,15 @@ module Heya
       class_attribute :__defaults, default: {}.freeze
       class_attribute :__segments, default: [].freeze
       class_attribute :__user_type, default: nil
+      class_attribute :__time_zone, default: nil
+      class_attribute :__send_at, default: nil
 
       STEP_ATTRS = {
         action: Actions::Email,
         wait: 2.days,
         segment: nil,
-        queue: "heya"
+        queue: "heya",
+        send_at: nil
       }.freeze
 
       class << self
@@ -112,6 +123,24 @@ module Heya
           __user_type || Heya.config.user_type
         end
 
+        def time_zone(value = nil)
+          if value.present?
+            self.__time_zone = value.to_s
+          end
+
+          __time_zone || Heya.config.default_time_zone
+        end
+
+        def send_at(value = nil)
+          if value.present?
+            # Validate the send_at value
+            ScheduleCalculator.parse_send_at(value)
+            self.__send_at = value
+          end
+
+          __send_at
+        end
+
         def segment(arg = nil, &block)
           if block
             self.__segments = ([block] | __segments).freeze
@@ -133,6 +162,8 @@ module Heya
               .merge(opts)
 
           attrs = opts.select { |k, _| STEP_ATTRS.key?(k) }
+          # Fall back to campaign-level send_at if step doesn't have one
+          attrs[:send_at] ||= __send_at
           attrs[:id] = "#{self.name}/#{name}"
           attrs[:name] = name.to_s
           attrs[:campaign] = instance

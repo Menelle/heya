@@ -50,7 +50,19 @@ module Heya
     }
 
     scope :to_process, ->(now: Time.now, user: nil) {
-      query = upcoming.where('heya_campaign_memberships.last_sent_at <= (:now::timestamp - make_interval(secs := "heya_steps".wait))', now: now.utc)
+      query = upcoming.where(<<~SQL, now: now.utc)
+        (
+          -- New: use scheduled_for if present
+          "heya_campaign_memberships".scheduled_for IS NOT NULL
+          AND "heya_campaign_memberships".scheduled_for <= :now::timestamp
+        )
+        OR
+        (
+          -- Legacy: fall back to last_sent_at + wait
+          "heya_campaign_memberships".scheduled_for IS NULL
+          AND heya_campaign_memberships.last_sent_at <= (:now::timestamp - make_interval(secs := "heya_steps".wait))
+        )
+      SQL
       query = query.where(user: user) if user
       query
     }

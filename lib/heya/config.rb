@@ -7,6 +7,7 @@ module Heya
     def initialize
       super(
         user_type: "User",
+        default_time_zone: "UTC",
         campaigns: OpenStruct.new(
           priority: [],
           default_options: {}

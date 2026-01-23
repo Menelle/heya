@@ -12,7 +12,7 @@ module Heya
         campaign_name.constantize.steps.find { |s| s.id == id }
       end
 
-      def initialize(id:, name:, campaign:, position:, action:, wait:, segment:, queue:, params: {})
+      def initialize(id:, name:, campaign:, position:, action:, wait:, segment:, queue:, send_at: nil, params: {})
         super
         if action.respond_to?(:validate_step)
           action.validate_step(self)
@@ -29,6 +29,23 @@ module Heya
 
       def campaign_name
         @campaign_name ||= campaign.name
+      end
+
+      # Returns true if this step has a send_at time specified.
+      def has_send_at?
+        !send_at.nil?
+      end
+
+      # Returns the parsed send_at hour, or nil if not specified.
+      def send_at_hour
+        parsed = ScheduleCalculator.parse_send_at(send_at)
+        parsed&.first
+      end
+
+      # Returns the parsed send_at minute, or nil if not specified.
+      def send_at_minute
+        parsed = ScheduleCalculator.parse_send_at(send_at)
+        parsed&.last
       end
     end
   end

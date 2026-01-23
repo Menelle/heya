@@ -456,6 +456,216 @@ module Heya
 
         assert_equal campaign.steps[2].gid, membership.step_gid
       end
+
+      # send_at scheduling tests
+
+      test "it schedules steps at specified send_at time" do
+        action = Minitest::Mock.new
+        campaign = create_test_campaign {
+          default action: action
+          user_type "Contact"
+          time_zone "UTC"
+          step :one, wait: 1.day, send_at: "10:00"
+          step :two, wait: 1.day, send_at: "14:00"
+        }
+        contact = contacts(:one)
+
+        Timecop.freeze(Time.utc(2025, 1, 20, 8, 0)) do
+          campaign.add(contact, send_now: false)
+        end
+
+        membership = CampaignMembership.where(user: contact, campaign_gid: campaign.gid).first
+        # Monday 8:00 + 1 day = Tuesday, at 10:00
+        assert_equal Time.utc(2025, 1, 21, 10, 0), membership.scheduled_for
+      end
+
+      test "it postpones campaign to next day when first step send_at is in past" do
+        action = Minitest::Mock.new
+        campaign = create_test_campaign {
+          default action: action
+          user_type "Contact"
+          time_zone "UTC"
+          step :one, wait: 0, send_at: "10:00"
+          step :two, wait: 0, send_at: "14:00"
+          step :three, wait: 0, send_at: "16:00"
+        }
+        contact = contacts(:one)
+
+        # User joins at 18:00, after all send_at times
+        Timecop.freeze(Time.utc(2025, 1, 20, 18, 0)) do
+          campaign.add(contact, send_now: false)
+        end
+
+        membership = CampaignMembership.where(user: contact, campaign_gid: campaign.gid).first
+        # 10:00 is past, so step 1 should be scheduled for next day
+        assert_equal Time.utc(2025, 1, 21, 10, 0), membership.scheduled_for
+      end
+
+      test "it sends multiple steps on same day at different times" do
+        action = Minitest::Mock.new
+        campaign = create_test_campaign {
+          default action: action
+          user_type "Contact"
+          time_zone "UTC"
+          step :one, wait: 0, send_at: "10:00"
+          step :two, wait: 0, send_at: "14:00"
+          step :three, wait: 0, send_at: "16:00"
+        }
+        contact = contacts(:one)
+
+        # User joins at 8:00
+        Timecop.freeze(Time.utc(2025, 1, 20, 8, 0)) do
+          campaign.add(contact, send_now: false)
+        end
+
+        membership = CampaignMembership.where(user: contact, campaign_gid: campaign.gid).first
+        assert_equal Time.utc(2025, 1, 20, 10, 0), membership.scheduled_for
+
+        # Process step 1 at 10:05
+        Timecop.freeze(Time.utc(2025, 1, 20, 10, 5)) do
+          action.expect(:new, NullMail, user: contact, step: campaign.steps[0])
+          run_once
+        end
+
+        membership.reload
+        assert_equal campaign.steps[1].gid, membership.step_gid
+        assert_equal Time.utc(2025, 1, 20, 14, 0), membership.scheduled_for
+
+        # Process step 2 at 14:05
+        Timecop.freeze(Time.utc(2025, 1, 20, 14, 5)) do
+          action.expect(:new, NullMail, user: contact, step: campaign.steps[1])
+          run_once
+        end
+
+        membership.reload
+        assert_equal campaign.steps[2].gid, membership.step_gid
+        assert_equal Time.utc(2025, 1, 20, 16, 0), membership.scheduled_for
+
+        assert_mock action
+      end
+
+      test "skipped step does not delay subsequent steps" do
+        action = Minitest::Mock.new
+        campaign = create_test_campaign {
+          default action: action
+          user_type "Contact"
+          time_zone "UTC"
+          step :one, wait: 2.days, send_at: "11:00"
+          step :two, wait: 2.days, send_at: "10:00", segment: ->(u) { u.traits["premium"] }
+          step :three, wait: 2.days, send_at: "9:00"
+        }
+        contact = contacts(:one)
+        # Contact is NOT premium
+
+        # User joins Monday 14:00
+        Timecop.freeze(Time.utc(2025, 1, 20, 14, 0)) do
+          campaign.add(contact, send_now: false)
+        end
+
+        membership = CampaignMembership.where(user: contact, campaign_gid: campaign.gid).first
+        # Monday + 2 days = Wednesday, at 11:00
+        assert_equal Time.utc(2025, 1, 22, 11, 0), membership.scheduled_for
+
+        # Process step 1 at Wednesday 11:05
+        Timecop.freeze(Time.utc(2025, 1, 22, 11, 5)) do
+          action.expect(:new, NullMail, user: contact, step: campaign.steps[0])
+          run_once
+        end
+
+        membership.reload
+        assert_equal campaign.steps[1].gid, membership.step_gid
+        # Wednesday 11:05 + 2 days = Friday, at 10:00
+        assert_equal Time.utc(2025, 1, 24, 10, 0), membership.scheduled_for
+
+        # Process step 2 at Friday 10:05 - should be SKIPPED (not premium)
+        Timecop.freeze(Time.utc(2025, 1, 24, 10, 5)) do
+          run_once
+          # No action expectation - step is skipped
+        end
+
+        membership.reload
+        assert_equal campaign.steps[2].gid, membership.step_gid
+        # Step 3 should use last_sent_at (Wed 11:05) as reference
+        # Wed 11:05 + 2 days = Friday, at 9:00
+        # Friday 9:00 < Friday 10:05 (now), same day - send immediately
+        # The scheduled_for will be Fri 9:00 but scheduler will pick it up immediately
+        assert_equal Time.utc(2025, 1, 24, 9, 0), membership.scheduled_for
+
+        # Step 3 should be processed immediately (Fri 9:00 < Fri 10:05)
+        action.expect(:new, NullMail, user: contact, step: campaign.steps[2])
+        Timecop.freeze(Time.utc(2025, 1, 24, 10, 5)) do
+          run_once
+        end
+
+        assert_mock action
+      end
+
+      test "skipped step with past date rolls forward to next occurrence" do
+        action = Minitest::Mock.new
+        campaign = create_test_campaign {
+          default action: action
+          user_type "Contact"
+          time_zone "UTC"
+          step :one, wait: 0, send_at: "14:00"
+          step :two, wait: 0, send_at: "10:00", segment: ->(u) { u.traits["premium"] }
+          step :three, wait: 0, send_at: "16:00"
+        }
+        contact = contacts(:one)
+        # Contact is NOT premium
+
+        # User joins Monday 8:00
+        Timecop.freeze(Time.utc(2025, 1, 20, 8, 0)) do
+          campaign.add(contact, send_now: false)
+        end
+
+        membership = CampaignMembership.where(user: contact, campaign_gid: campaign.gid).first
+        assert_equal Time.utc(2025, 1, 20, 14, 0), membership.scheduled_for
+
+        # Process step 1 at Monday 14:05
+        Timecop.freeze(Time.utc(2025, 1, 20, 14, 5)) do
+          action.expect(:new, NullMail, user: contact, step: campaign.steps[0])
+          run_once
+        end
+
+        membership.reload
+        assert_equal campaign.steps[1].gid, membership.step_gid
+        # 10:00 < 14:05, so rolls to next day
+        assert_equal Time.utc(2025, 1, 21, 10, 0), membership.scheduled_for
+
+        # Process step 2 at Tuesday 10:05 - should be SKIPPED
+        Timecop.freeze(Time.utc(2025, 1, 21, 10, 5)) do
+          run_once
+        end
+
+        membership.reload
+        assert_equal campaign.steps[2].gid, membership.step_gid
+        # Step 3: reference = Monday 14:05 (last_sent_at), send_at = 16:00
+        # Monday 16:00 > Monday 14:05, so no roll for reference check
+        # BUT Monday 16:00 < Tuesday 10:05 (now), past DATE
+        # Should roll forward to Tuesday 16:00
+        assert_equal Time.utc(2025, 1, 21, 16, 0), membership.scheduled_for
+
+        # Step 3 should be processed at Tuesday 16:05
+        Timecop.freeze(Time.utc(2025, 1, 21, 16, 5)) do
+          action.expect(:new, NullMail, user: contact, step: campaign.steps[2])
+          run_once
+        end
+
+        assert_mock action
+      end
+
+      test "campaign-level send_at is used as fallback for steps" do
+        campaign = create_test_campaign {
+          user_type "Contact"
+          time_zone "UTC"
+          send_at "10:00"
+          step :one, wait: 1.day
+          step :two, wait: 1.day, send_at: "14:00"
+        }
+
+        assert_equal "10:00", campaign.steps[0].send_at
+        assert_equal "14:00", campaign.steps[1].send_at
+      end
     end
   end
 end
