@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Added
 - Support Rails 8.0 (#286, @jbennett)
+- Add `send_at` option for scheduling messages at specific times of day
+- Add campaign-level `send_at` method for setting a default send time for all steps
+- Add `time_zone` method for campaign-level time zone configuration
+- Add `scheduled_for` column to track precise scheduling (run `rails generate heya:upgrade` to add)
 
 ## [0.12.0] - 2024-10-25
 ### Added

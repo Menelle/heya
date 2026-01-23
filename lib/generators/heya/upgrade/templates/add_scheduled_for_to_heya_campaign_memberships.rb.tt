@@ -1,0 +1,6 @@
+class AddScheduledForToHeyaCampaignMemberships < ActiveRecord::Migration[<%= ActiveRecord::VERSION::MAJOR %>.<%= ActiveRecord::VERSION::MINOR %>]
+  def change
+    add_column :heya_campaign_memberships, :scheduled_for, :datetime
+    add_index :heya_campaign_memberships, :scheduled_for, where: "scheduled_for IS NOT NULL", name: :scheduled_for_x
+  end
+end

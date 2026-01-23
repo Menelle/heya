@@ -8,11 +8,13 @@ class CreateHeyaTables < ActiveRecord::Migration[<%= ActiveRecord::VERSION::MAJO
       t.boolean :concurrent, null: false, default: false
 
       t.datetime :last_sent_at, null: false
+      t.datetime :scheduled_for
 
       t.timestamps
     end
 
     add_index :heya_campaign_memberships, [:user_type, :user_id, :campaign_gid], unique: true, name: :user_campaign_idx
+    add_index :heya_campaign_memberships, :scheduled_for, where: "scheduled_for IS NOT NULL", name: :scheduled_for_x
 
     create_table :heya_campaign_receipts do |t|
       t.references :user, null: false, polymorphic: true, index: false
