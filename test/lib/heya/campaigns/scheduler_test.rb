@@ -654,6 +654,52 @@ module Heya
         assert_mock action
       end
 
+      test "step with later send_at followed by step with earlier send_at sends on different days" do
+        action = Minitest::Mock.new
+        campaign = create_test_campaign {
+          default action: action
+          user_type "Contact"
+          time_zone "UTC"
+          step :one, wait: 1.day, send_at: "11:00"
+          step :two, wait: 1.day, send_at: "10:00"
+        }
+        contact = contacts(:one)
+
+        # User joins Monday 14:00
+        Timecop.freeze(Time.utc(2025, 1, 20, 14, 0)) do
+          campaign.add(contact, send_now: false)
+        end
+
+        membership = CampaignMembership.where(user: contact, campaign_gid: campaign.gid).first
+        # Monday 14:00 + 1 day = Tuesday, at 11:00
+        assert_equal Time.utc(2025, 1, 21, 11, 0), membership.scheduled_for
+
+        # Process step 1 at Tuesday 11:05
+        Timecop.freeze(Time.utc(2025, 1, 21, 11, 5)) do
+          action.expect(:new, NullMail, user: contact, step: campaign.steps[0])
+          run_once
+        end
+
+        membership.reload
+        assert_equal campaign.steps[1].gid, membership.step_gid
+        # Step 2: reference = Tuesday 11:05 (last_sent_at) + 1 day = Wednesday, at 10:00
+        assert_equal Time.utc(2025, 1, 22, 10, 0), membership.scheduled_for
+
+        # Verify step 2 is NOT sent at Tuesday 11:10 (next cron run same day)
+        Timecop.freeze(Time.utc(2025, 1, 21, 11, 10)) do
+          run_once
+        end
+        assert_mock action # No action expected - step 2 should not fire yet
+
+        # Step 2 should be sent at Wednesday 10:05
+        Timecop.freeze(Time.utc(2025, 1, 22, 10, 5)) do
+          action.expect(:new, NullMail, user: contact, step: campaign.steps[1])
+          run_once
+        end
+
+        assert_mock action
+      end
+
       test "campaign-level send_at is used as fallback for steps" do
         campaign = create_test_campaign {
           user_type "Contact"

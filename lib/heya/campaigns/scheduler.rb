@@ -36,6 +36,7 @@ module Heya
           end
 
           process(campaign, step, membership)
+          membership.reload
 
           if (next_step = get_next_step(campaign, step, membership.user))
             next_scheduled_for = calculate_next_scheduled_for(
